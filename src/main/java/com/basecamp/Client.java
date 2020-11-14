@@ -1,4 +1,4 @@
-package com.basecamp.main;
+package com.basecamp;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
