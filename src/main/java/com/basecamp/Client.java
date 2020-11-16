@@ -1,5 +1,8 @@
 package com.basecamp;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
@@ -7,8 +10,12 @@ import java.nio.channels.SocketChannel;
 import java.util.*;
 
 public class Client {
-    private static InetSocketAddress serverAddress;
-    private static SocketChannel clientChannel;
+    private static final Logger LOG = LoggerFactory.getLogger(Client.class);
+
+    private static final String HOST = "localhost";
+    private static final int PORT = 8090;
+
+    private static SocketChannel channel;
     private static String myId;
     private static boolean readyToClose;
     private static HashMap<String, int[]> idToKeyMap = new HashMap<>();
@@ -16,28 +23,27 @@ public class Client {
     public static void main(String[] args) {
 
         try {
-            serverAddress = new InetSocketAddress("localhost", 8090);
-            clientChannel = SocketChannel.open(serverAddress);
+            InetSocketAddress serverAddress = new InetSocketAddress(HOST, PORT);
+            channel = SocketChannel.open(serverAddress);
 
-            System.out.println("Connected to server..." + "\n");
+            LOG.info("Connected to server...");
 
             setInitInfo();
 
         } catch (IOException e) {
-            System.out.println("!You cannot get initial information from server!");
+            LOG.error("!You cannot get initial information from server!");
             return;
         }
 
         new Thread(() -> {
 
-            System.out.println("Input string format: '123!Hello'(friendId!message) or 'Close'(disconnect)" + "\n"); //hint
+            LOG.info("Input string format: '123!Hello'(friendId!message) or 'Close'(disconnect)");
 
             try {
                 input();
 
             } catch (IOException | InterruptedException e) {
-                System.out.println("!You cannot send this message!");
-
+                LOG.error("!You cannot send this message!");
             }
 
         }).start();
@@ -50,13 +56,12 @@ public class Client {
             } catch (IOException | InterruptedException e) {
 
                 try {
-                    clientChannel.close();
+                    channel.close();
                 } catch (IOException e1) {
-                    System.out.println("!Cannot close connection with server!");
+                    LOG.error("!Cannot close connection with server!");
                 }
 
-                System.out.println("!Connection with server has been broken!");
-
+                LOG.error("!Connection with server has been broken!");
             }
 
         }).start();
@@ -66,49 +71,52 @@ public class Client {
     private static void setInitInfo() throws IOException {
 
         ByteBuffer buffer = ByteBuffer.allocate(200);
-        StringBuilder messageWithIds = new StringBuilder();
+        StringBuilder ids = new StringBuilder();
 
-        clientChannel.read(buffer);
+        channel.read(buffer);
         buffer.flip();
 
         while (buffer.hasRemaining()) {
-            messageWithIds.append((char) buffer.get());
+            ids.append((char) buffer.get());
         }
 
-        int index = messageWithIds.lastIndexOf("!");
-        myId = messageWithIds.substring(++index);
+        int index = ids.lastIndexOf("!");
+        myId = ids.substring(++index);
 
-        System.out.println("My id: " + myId);
+        LOG.info("My id: {}", myId);
 
         if (index == 1) {
-            System.out.println("Ids of my online friends: [no friends online]" + "\n");
+            LOG.info("Ids of my online friends: [no friends online]");
+
         } else {
-            System.out.println("Ids of my online friends: " + messageWithIds.substring(0, index) + "\n");
+            LOG.info("Ids of my online friends: {}", ids.substring(0, index));
         }
     }
 
     private static void input() throws IOException, InterruptedException {
 
-        while (clientChannel.isConnected()) {
+        while (channel.isConnected()) {
 
-            System.out.print("New message: ");
+            LOG.info("New message: ");
 
             Scanner scanner = new Scanner(System.in).useDelimiter("!");
 
             String inputId = scanner.next();
 
             //Check if input has valid format
-            if (inputId.matches("^[0-9]+$") && !(inputId.equals(myId)) && scanner.hasNext()) {
+            if (inputId.matches("^[0-9]+$") &&
+                    !(inputId.equals(myId)) && scanner.hasNext()) {
 
                 String inputMessage = scanner.nextLine().substring(1); //To remove '!'
                 workWithPhases(inputId, 1, inputMessage);
 
             } else if ("Close".equals(inputId)) {
                 ByteBuffer buffer = ByteBuffer.wrap("readyToClose".getBytes());
-                clientChannel.write(buffer);
+                channel.write(buffer);
                 break; //To exit from input thread
+
             } else {
-                System.out.println("Wrong input format");
+                LOG.error("Wrong input format");
             }
         }
     }
@@ -120,7 +128,7 @@ public class Client {
             ByteBuffer buffer = ByteBuffer.allocate(5000);
             StringBuilder message = new StringBuilder();
 
-            clientChannel.read(buffer);
+            channel.read(buffer);
             buffer.flip(); //for read
 
             while (buffer.hasRemaining()) {
@@ -129,9 +137,10 @@ public class Client {
                 if (symbol == ']') {
 
                     if ("Close".equals(message.toString())) {
-                        clientChannel.close();
+                        channel.close();
                         readyToClose = true;
                         break;
+
                     } else {
                         parseMessage(message.toString());
                         message.setLength(0);
@@ -144,7 +153,8 @@ public class Client {
         }
     }
 
-    private static void parseMessage(String message) throws IOException, InterruptedException {
+    private static void parseMessage(String message)
+            throws IOException, InterruptedException {
 
         StringTokenizer stringTokenizer = new StringTokenizer(message, "!");
 
@@ -156,25 +166,31 @@ public class Client {
         workWithPhases(senderId, phase, receivedMessage);
     }
 
-    private static void workWithPhases(String id, int phase, String message) throws IOException, InterruptedException {
+    private static void workWithPhases(String id, int phase, String message)
+            throws IOException, InterruptedException {
         if (phase == 1 || phase == 2) {
             int[] encryptionKey = generateKey(message.chars().toArray().length);
 
             idToKeyMap.put(id, encryptionKey);
 
-            String encryptedMessage = new String(encrypt(message.chars().toArray(), encryptionKey));
+            String encryptedMessage = new String(
+                    encrypt(message.chars().toArray(), encryptionKey));
             sendMessage(id, ++phase, encryptedMessage);
+
         } else if (phase == 3) {
             int[] encryptionKey = idToKeyMap.get(id);
 
-            String encryptedMessage = new String(encrypt(message.chars().toArray(), encryptionKey));
+            String encryptedMessage = new String(
+                    encrypt(message.chars().toArray(), encryptionKey));
             sendMessage(id, ++phase, encryptedMessage);
+
         } else if (phase == 4) {
             int[] encryptionKey = idToKeyMap.get(id);
 
-            String decryptedMessage = new String(encrypt(message.chars().toArray(), encryptionKey));
+            String decryptedMessage = new String(
+                    encrypt(message.chars().toArray(), encryptionKey));
 
-            System.out.println("\n" + "Received message from " + id + ": " + decryptedMessage);
+            LOG.info("Received message from {}: {}", id, decryptedMessage);
         }
     }
 
@@ -198,13 +214,15 @@ public class Client {
         return encryptedMessage;
     }
 
-    private static void sendMessage(String receiverId, int phase, String message) throws IOException, InterruptedException {
+    private static void sendMessage(String receiverId, int phase, String message)
+            throws IOException, InterruptedException {
 
-        String messageForWrite = myId + "!" + receiverId + "!" + phase + "!" + message + "]";
+        String messageForWrite =
+                myId + "!" + receiverId + "!" + phase + "!" + message + "]";
 
         ByteBuffer buffer = ByteBuffer.wrap(messageForWrite.getBytes());
 
-        clientChannel.write(buffer);
+        channel.write(buffer);
 
         Thread.sleep(1); //To prevent sending many answers in one message
     }

@@ -1,5 +1,9 @@
 package com.basecamp;
 
+import org.apache.commons.lang3.RandomStringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
@@ -11,27 +15,23 @@ import java.nio.channels.SocketChannel;
 import java.util.*;
 
 public class Server {
-    private static Selector selector;
-    private static ServerSocketChannel serverSocketChannel;
-    private static InetSocketAddress serverAddress;
+    private static final Logger LOG = LoggerFactory.getLogger(Server.class);
+
+    private static final String HOST = "localhost";
+    private static final int PORT = 8090;
+    private static final int ID_LENGTH = 3;
+    private static final int BUFFER_CAPACITY = 50;
+
     private static LinkedHashMap<SocketAddress, String> addressToIdMap = new LinkedHashMap<>();
     private static HashMap<String, ArrayList<String>> idToMessagesMap = new HashMap<>();
-    private static int randomId = 0;
-    private static ByteBuffer buffer;
 
     public static void main(String[] args) throws IOException, InterruptedException {
-        selector = Selector.open();
 
-        serverSocketChannel = ServerSocketChannel.open();
-        serverAddress = new InetSocketAddress("localhost", 8090);
+        Selector selector = Selector.open();
 
-        serverSocketChannel.bind(serverAddress);
+        ServerSocketChannel serverSocketChannel = createServerChannel(selector);
 
-        serverSocketChannel.configureBlocking(false);
-
-        serverSocketChannel.register(selector, SelectionKey.OP_ACCEPT);
-
-        System.out.println("Server started..." + "\n");
+        LOG.info("Server started...");
 
         while (true) {
             selector.select();
@@ -40,109 +40,156 @@ public class Server {
             Iterator<SelectionKey> iterator = selectionKeys.iterator();
 
             while (iterator.hasNext()) {
-                SelectionKey nextKey = iterator.next();
+                SelectionKey key = iterator.next();
 
-                if (nextKey.isAcceptable()) {
+                if (key.isAcceptable()) {
 
-                    SocketChannel clientChannel = serverSocketChannel.accept();
+                    SocketChannel clientChannel =
+                            registerNewClientChannel(selector, serverSocketChannel);
+                    sendInitInfo(clientChannel);
 
-                    clientChannel.configureBlocking(false);
+                } else if (key.isReadable()) {
 
-                    clientChannel.register(selector, SelectionKey.OP_READ | SelectionKey.OP_WRITE);
+                    SocketChannel senderChannel = (SocketChannel) key.channel();
+                    readFrom(senderChannel);
 
+                } else if (key.isWritable()) {
 
-                    SocketAddress remoteAddress = clientChannel.getRemoteAddress();
-
-                    addressToIdMap.put(remoteAddress, ++randomId + "");
-
-                    //Send info for client init
-                    String clientsIds = "";
-
-                    for (SocketAddress address : addressToIdMap.keySet()) {
-                        clientsIds += ("!" + addressToIdMap.get(address));
-                    }
-
-                    ByteBuffer buffer = ByteBuffer.wrap(clientsIds.getBytes());
-
-                    clientChannel.write(buffer);
-                    Thread.sleep(1); //To prevent sending ids and messages at the same time
-
-                    System.out.println("Connection with " + remoteAddress + "(id:" + randomId + ") accepted" + "\n");
-                } else if (nextKey.isReadable()) {
-
-                    SocketChannel senderChannel = (SocketChannel) nextKey.channel();
-
-                    buffer = ByteBuffer.allocate(50);
-                    int bytesRead = senderChannel.read(buffer);
-
-                    StringBuilder receivedMessage = new StringBuilder();
-
-                    while (bytesRead > 0) {
-                        buffer.flip(); //for read
-
-                        while (buffer.hasRemaining()) {
-                            receivedMessage.append((char) buffer.get());
-                        }
-
-                        buffer.clear(); //for write
-                        bytesRead = senderChannel.read(buffer);
-                    }
-
-                    if ("readyToClose".equals(receivedMessage.toString())) {
-                        buffer = ByteBuffer.wrap("Close]".getBytes());
-                        senderChannel.write(buffer);
-
-                        SocketAddress remoteAddress = senderChannel.getRemoteAddress();
-                        String remoteId = addressToIdMap.get(remoteAddress);
-
-                        addressToIdMap.remove(remoteAddress);
-                        senderChannel.close();
-
-                        System.out.println("Connection with " + remoteAddress + "(id:" + remoteId + ") closed");
-                    }
-                    else {
-                        System.out.println("Received message: " + receivedMessage.toString());
-
-                        int from = receivedMessage.indexOf("!");
-                        int to = receivedMessage.indexOf("!", from + 1);
-                        String receiverId = receivedMessage.substring(++from, to);
-
-                        if (idToMessagesMap.containsKey(receiverId)) {
-                            ArrayList<String> listOfMessages = idToMessagesMap.get(receiverId);
-                            listOfMessages.add(receivedMessage.toString());
-                        }
-                        else {
-                            ArrayList<String> listOfMessages = new ArrayList<>();
-                            listOfMessages.add(receivedMessage.toString());
-                            idToMessagesMap.put(receiverId, listOfMessages);
-                        }
-                    }
-                } else if (nextKey.isWritable()) {
-
-                    SocketChannel receiverChannel = (SocketChannel) nextKey.channel();
-
-                    SocketAddress receiverAddress = receiverChannel.getRemoteAddress();
-
-                    String receiverId = addressToIdMap.get(receiverAddress);
-
-                    if (idToMessagesMap.containsKey(receiverId)) {
-
-                        for (String message : idToMessagesMap.get(receiverId)) {
-
-                            ByteBuffer buffer = ByteBuffer.wrap(message.getBytes());
-
-                            receiverChannel.write(buffer);
-
-                            System.out.println("Sent message: " + new String(buffer.array()) + "\n");
-
-                        }
-
-                        idToMessagesMap.remove(receiverId);
-                    }
+                    SocketChannel receiverChannel = (SocketChannel) key.channel();
+                    writeTo(receiverChannel);
                 }
 
                 iterator.remove(); //to prevent the same key
             }
+        }
+    }
+
+    private static ServerSocketChannel createServerChannel(
+            Selector selector) throws IOException {
+
+        InetSocketAddress serverAddress = new InetSocketAddress(HOST, PORT);
+
+        ServerSocketChannel channel = ServerSocketChannel.open();
+        channel.bind(serverAddress);
+        channel.configureBlocking(false);
+        channel.register(selector, SelectionKey.OP_ACCEPT);
+
+        return channel;
+    }
+
+
+    private static SocketChannel registerNewClientChannel(
+            Selector selector, ServerSocketChannel serverChannel) throws IOException {
+
+        SocketChannel clientChannel = serverChannel.accept();
+        clientChannel.configureBlocking(false);
+        clientChannel.register(selector,
+                SelectionKey.OP_READ | SelectionKey.OP_WRITE);
+
+        SocketAddress clientAddress = clientChannel.getRemoteAddress();
+        String clientId = RandomStringUtils.randomNumeric(ID_LENGTH);
+
+        addressToIdMap.put(clientAddress, clientId);
+
+        LOG.info("Connection with {}(id:{}) accepted", clientAddress, clientId);
+
+        return clientChannel;
+    }
+
+    private static void sendInitInfo(SocketChannel clientChannel)
+            throws IOException, InterruptedException {
+
+        StringBuilder ids = new StringBuilder();
+        addressToIdMap.values().forEach(id -> ids.append("!").append(id));
+
+        ByteBuffer buffer = ByteBuffer.wrap(ids.toString().getBytes());
+        clientChannel.write(buffer);
+
+        Thread.sleep(1); //To prevent sending ids and messages at the same time
+    }
+
+    private static void readFrom(SocketChannel channel) throws IOException {
+
+        String receivedMessage = getMessage(channel);
+
+        LOG.info("Received message: {}", receivedMessage);
+
+        if ("readyToClose".equals(receivedMessage)) {
+            closeChannel(channel);
+
+        } else {
+            saveMessage(receivedMessage);
+        }
+    }
+
+    private static String getMessage(SocketChannel channel) throws IOException {
+
+        StringBuilder message = new StringBuilder();
+
+        ByteBuffer buffer = ByteBuffer.allocate(BUFFER_CAPACITY);
+        int bytesCount = channel.read(buffer);
+
+        while (bytesCount > 0) {
+            buffer.flip(); //for read
+
+            while (buffer.hasRemaining()) {
+                message.append((char) buffer.get());
+            }
+
+            buffer.clear(); //for write
+            bytesCount = channel.read(buffer);
+        }
+
+        return message.toString();
+    }
+
+    private static void closeChannel(SocketChannel channel) throws IOException {
+
+        ByteBuffer buffer = ByteBuffer.wrap("Close]".getBytes());
+        channel.write(buffer);
+
+        SocketAddress address = channel.getRemoteAddress();
+        String id = addressToIdMap.get(address);
+
+        addressToIdMap.remove(address);
+        channel.close();
+
+        LOG.info("Connection with {}(id:{}) closed", address, id);
+    }
+
+    private static void saveMessage(String massage) {
+
+        int from = massage.indexOf('!');
+        int to = massage.indexOf('!', from + 1);
+        String receiverId = massage.substring(++from, to);
+
+        if (idToMessagesMap.containsKey(receiverId)) {
+            ArrayList<String> messages = idToMessagesMap.get(receiverId);
+            messages.add(massage);
+
+        } else {
+            ArrayList<String> messages = new ArrayList<>();
+            messages.add(massage);
+            idToMessagesMap.put(receiverId, messages);
+        }
+    }
+
+    private static void writeTo(SocketChannel channel) throws IOException {
+
+        SocketAddress address = channel.getRemoteAddress();
+        String id = addressToIdMap.get(address);
+
+        if (idToMessagesMap.containsKey(id)) {
+
+            for (String message : idToMessagesMap.get(id)) {
+
+                ByteBuffer buffer = ByteBuffer.wrap(message.getBytes());
+                channel.write(buffer);
+
+                LOG.info("Sent message: {}", message);
+            }
+
+            idToMessagesMap.remove(id);
         }
     }
 }
