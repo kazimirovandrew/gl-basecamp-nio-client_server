@@ -5,5 +5,8 @@ repositories {
 }
 
 dependencies {
-    compile group: 'org.apache.logging.log4j', name: 'log4j-core', version: '2.14.0'
+    compile group: 'org.apache.commons', name: 'commons-lang3', version: '3.11'
+    compile group: 'org.slf4j', name: 'slf4j-api', version: '1.7.25'
+    compile group: 'org.slf4j', name: 'slf4j-simple', version: '1.7.25'
+
 }
